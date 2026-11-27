@@ -1,3 +1,5 @@
+import http from 'node:http';
+import https from 'node:https';
 import {
   ButtonStyleTypes,
   InteractionResponseFlags,
@@ -40,9 +42,20 @@ const KNOWN_MAPS = {
 function formatServerName(id) {
   const known = DEFAULT_SERVERS.find((s) => s.id === id);
   if (known) return known.name;
+  const hubMatch = /^hub(\d+)$/i.exec(id);
+  if (hubMatch) return `Hub ${hubMatch[1]}`;
   const gameMatch = /^game(\d+)$/i.exec(id);
   if (gameMatch) return `Game ${gameMatch[1]}`;
   return id.charAt(0).toUpperCase() + id.slice(1);
+}
+
+function serverSortKey(server) {
+  if (server.id === 'hub') return [0, 0, server.id];
+  const hubMatch = /^hub(\d+)$/i.exec(server.id);
+  if (hubMatch) return [0, Number(hubMatch[1]), server.id];
+  const gameMatch = /^game(\d+)$/i.exec(server.id);
+  if (gameMatch) return [1, Number(gameMatch[1]), server.id];
+  return [2, 0, server.id];
 }
 
 function formatMapName(rawMap) {
@@ -69,7 +82,13 @@ function getOrderedServers(statusData) {
     }
   }
 
-  return list;
+  return list.sort((a, b) => {
+    const ka = serverSortKey(a);
+    const kb = serverSortKey(b);
+    if (ka[0] !== kb[0]) return ka[0] - kb[0];
+    if (ka[1] !== kb[1]) return ka[1] - kb[1];
+    return ka[2].localeCompare(kb[2]);
+  });
 }
 
 function isHubServer(serverId, entry) {
@@ -157,15 +176,24 @@ export function buildStatusPayload(statusData, fetchError) {
   let onlineServers = 0;
   let hubOnline = false;
 
-  const hubServer = servers.find((server) => isHubServer(server.id, statusData?.[server.id])) || DEFAULT_SERVERS[0];
-  const gameServers = servers.filter((server) => server.id !== hubServer.id);
+  const hubServers = servers.filter((server) => isHubServer(server.id, statusData?.[server.id]));
+  if (hubServers.length === 0) hubServers.push(DEFAULT_SERVERS[0]);
+  const hubIds = new Set(hubServers.map((s) => s.id));
+  const gameServers = servers.filter((server) => !hubIds.has(server.id));
 
-  const hubEntry = statusData?.[hubServer.id];
-  if (hasValidEntry(hubEntry)) {
+  const hubLines = hubServers.map((server) => {
+    const entry = statusData?.[server.id];
+    if (!hasValidEntry(entry)) {
+      return hubServers.length > 1 ? `**${server.name}** — Offline` : 'Offline';
+    }
     hubOnline = true;
-    onlinePlayers += hubEntry.players;
+    onlinePlayers += entry.players;
     onlineServers += 1;
-  }
+    const mapLabel = formatMapName(entry.map) || 'Lobby';
+    return hubServers.length > 1
+      ? `**${server.name}** — **${entry.players} / ${entry.max}** online • \`${mapLabel}\``
+      : `**${entry.players} / ${entry.max}** online • \`${mapLabel}\``;
+  });
 
   const gameLines = gameServers.map((server) => {
     const entry = statusData?.[server.id];
@@ -192,17 +220,8 @@ export function buildStatusPayload(statusData, fetchError) {
   const playerWord = onlinePlayers === 1 ? 'player' : 'players';
   const serverWord = onlineServers === 1 ? 'server' : 'servers';
 
-  const hubDetails = hubOnline
-    ? [
-        `### ${hubServer.name.toUpperCase()}`,
-        `**${hubEntry.players} / ${hubEntry.max}** online • \`${formatMapName(hubEntry.map) || 'Lobby'}\``,
-        `-# Console: \`connect ${HUB_ADDRESS}\``,
-      ].join('\n')
-    : [
-        `### ${hubServer.name.toUpperCase()}`,
-        'Offline',
-        `-# Console: \`connect ${HUB_ADDRESS}\``,
-      ].join('\n');
+  const hubHeading = hubServers.length > 1 ? '### HUBS' : `### ${hubServers[0].name.toUpperCase()}`;
+  const hubDetails = [hubHeading, ...hubLines, `-# Console: \`connect ${HUB_ADDRESS}\``].join('\n');
 
   return {
     flags: InteractionResponseFlags.IS_COMPONENTS_V2,
@@ -262,22 +281,56 @@ function isComponentsV2Message(msg) {
   return Boolean((msg?.flags ?? 0) & InteractionResponseFlags.IS_COMPONENTS_V2);
 }
 
-async function fetchServerStatus() {
-  const res = await fetch(STATUS_URL, {
-    headers: { 'Cache-Control': 'no-cache' },
-    signal: AbortSignal.timeout(10_000),
+function fetchServerStatus() {
+  return new Promise((resolve, reject) => {
+    const targetUrl = new URL(STATUS_URL);
+    const client = targetUrl.protocol === 'https:' ? https : http;
+    const req = client.get(
+      targetUrl,
+      {
+        family: 4,
+        headers: {
+          'Cache-Control': 'no-cache',
+          Connection: 'close',
+          'User-Agent': 'DistrustOnlineBot/1.0',
+        },
+        timeout: 15_000,
+      },
+      (res) => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          res.resume();
+          reject(new Error(`Status request failed: HTTP ${res.statusCode}`));
+          return;
+        }
+
+        let raw = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          raw += chunk;
+        });
+        res.on('end', () => {
+          try {
+            const data = JSON.parse(raw);
+            if (!data || typeof data !== 'object' || Array.isArray(data)) {
+              reject(new Error('Status response has an invalid format'));
+              return;
+            }
+            resolve(data);
+          } catch (err) {
+            reject(new Error(`Invalid JSON in status response: ${err.message}`));
+          }
+        });
+      }
+    );
+
+    req.on('timeout', () => {
+      req.destroy(new Error(`Request to ${STATUS_URL} timed out after 15s`));
+    });
+    req.on('error', (err) => {
+      const code = err.code ? ` (${err.code})` : '';
+      reject(new Error(`${err.message}${code}`));
+    });
   });
-
-  if (!res.ok) {
-    throw new Error(`Status request failed: HTTP ${res.status}`);
-  }
-
-  const data = await res.json();
-  if (!data || typeof data !== 'object' || Array.isArray(data)) {
-    throw new Error('Status response has an invalid format');
-  }
-
-  return data;
 }
 
 async function findExistingStatusMessage(channelId, botUserId) {
