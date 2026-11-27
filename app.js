@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import {
   ButtonStyleTypes,
@@ -16,8 +18,14 @@ import { startServerTracker } from './serverTracker.js';
 const app = express();
 // Get port, or default to 3000
 const PORT = process.env.PORT || 3000;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // To keep track of our active games
 const activeGames = {};
+
+// Direct Garry's Mod Hub redirect (mirrors docs/connect.html for local/self-hosted use)
+app.get('/connect/hub', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'docs', 'connect.html'));
+});
 
 /**
  * Interactions endpoint URL where Discord will send HTTP requests

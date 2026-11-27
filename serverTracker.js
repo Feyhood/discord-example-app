@@ -1,11 +1,27 @@
-import { ButtonStyleTypes, MessageComponentTypes } from 'discord-interactions';
+import {
+  ButtonStyleTypes,
+  InteractionResponseFlags,
+  MessageComponentTypes,
+  SeparatorSpacingTypes,
+} from 'discord-interactions';
 import { DiscordRequest } from './utils.js';
 
 const STATUS_URL = process.env.STATUS_URL || 'http://57.128.191.109:8080/status.json';
-const JOIN_URL = process.env.JOIN_URL || 'http://57.128.191.109:8080/join/';
-const HUB_ADDRESS = process.env.HUB_ADDRESS || '57.128.191.109:27015';
+const DEFAULT_HUB_ADDRESS = '57.128.191.109:27015';
+const HUB_ADDRESS = process.env.HUB_ADDRESS || DEFAULT_HUB_ADDRESS;
+const HUB_CONNECT_URL =
+  process.env.HUB_CONNECT_URL || 'https://feyhood.github.io/discord-example-app/connect.html';
 const POLL_INTERVAL_MS = Number(process.env.STATUS_INTERVAL_MS) || 60_000;
-const EMBED_TITLE = 'Distrust Online — Server Status';
+
+const LEGACY_EMBED_TITLE = 'Distrust Online — Server Status';
+const STATUS_HEADER_MARKER = 'DISTRUST ONLINE';
+
+// Danganronpa Red & Yellow palette
+const COLORS = {
+  crimson: 0xe6192e, // Hub online
+  cautionYellow: 0xffcc00, // Hub offline, game servers still running
+  darkCrimson: 0x8b0000, // All offline or status unavailable
+};
 
 const DEFAULT_SERVERS = [
   { id: 'hub', name: 'Hub' },
@@ -16,12 +32,30 @@ const DEFAULT_SERVERS = [
   { id: 'game5', name: 'Game 5' },
 ];
 
+const KNOWN_MAPS = {
+  dro_lobby: 'Lobby',
+  dro_hopespeak_v3: "Hope's Peak v3",
+  dro_hopespeak_v3_mirror: "Hope's Peak v3 (Mirror)",
+  dro_hopespeak_v3_g2311: "Hope's Peak v3 (g2311)",
+};
+
 function formatServerName(id) {
   const known = DEFAULT_SERVERS.find((s) => s.id === id);
   if (known) return known.name;
   const gameMatch = /^game(\d+)$/i.exec(id);
   if (gameMatch) return `Game ${gameMatch[1]}`;
   return id.charAt(0).toUpperCase() + id.slice(1);
+}
+
+function formatMapName(rawMap) {
+  if (!rawMap) return null;
+  if (KNOWN_MAPS[rawMap]) return KNOWN_MAPS[rawMap];
+  const stripped = rawMap.replace(/^dro_/i, '');
+  return stripped
+    .split('_')
+    .filter(Boolean)
+    .map((part) => (/^v\d+$/i.test(part) ? part.toLowerCase() : part.charAt(0).toUpperCase() + part.slice(1)))
+    .join(' ');
 }
 
 function getOrderedServers(statusData) {
@@ -44,35 +78,80 @@ function isHubServer(serverId, entry) {
   return serverId === 'hub' || entry?.role === 'hub';
 }
 
-function buildHubConnectUrl() {
-  const url = new URL(JOIN_URL);
-  url.searchParams.set('to', 'hub');
+function hasValidEntry(entry) {
+  return Boolean(
+    entry?.online &&
+      Number.isInteger(entry.players) &&
+      Number.isInteger(entry.max) &&
+      entry.players >= 0 &&
+      entry.max >= 0
+  );
+}
+
+export function buildHubConnectUrl() {
+  const url = new URL(HUB_CONNECT_URL);
+  if (HUB_ADDRESS !== DEFAULT_HUB_ADDRESS && !url.searchParams.has('addr')) {
+    url.searchParams.set('addr', HUB_ADDRESS);
+  }
   return url.toString();
 }
 
-function buildStatusPayload(statusData, fetchError) {
+function buildConnectButton(hubOnline) {
+  return {
+    type: MessageComponentTypes.BUTTON,
+    style: ButtonStyleTypes.LINK,
+    label: hubOnline ? 'Connect to Hub' : 'Hub Offline',
+    url: buildHubConnectUrl(),
+    disabled: !hubOnline,
+  };
+}
+
+function buildSeparator(divider = true) {
+  return {
+    type: MessageComponentTypes.SEPARATOR,
+    divider,
+    spacing: SeparatorSpacingTypes.SMALL,
+  };
+}
+
+export function buildStatusPayload(statusData, fetchError) {
   const nowUnix = Math.floor(Date.now() / 1000);
+  const refreshSeconds = Math.round(POLL_INTERVAL_MS / 1000);
   const servers = getOrderedServers(statusData);
 
   if (fetchError) {
     return {
-      embeds: [
-        {
-          title: EMBED_TITLE,
-          description: `Unable to fetch live server status right now.\nLast checked: <t:${nowUnix}:R>`,
-          color: 0xe74c3c,
-          footer: { text: `Updates every ${Math.round(POLL_INTERVAL_MS / 1000)} seconds` },
-        },
-      ],
+      flags: InteractionResponseFlags.IS_COMPONENTS_V2,
       components: [
         {
-          type: MessageComponentTypes.ACTION_ROW,
+          type: MessageComponentTypes.CONTAINER,
+          accent_color: COLORS.darkCrimson,
           components: [
             {
-              type: MessageComponentTypes.BUTTON,
-              style: ButtonStyleTypes.LINK,
-              label: 'Connect to Hub',
-              url: buildHubConnectUrl(),
+              type: MessageComponentTypes.TEXT_DISPLAY,
+              content: [
+                `# ${STATUS_HEADER_MARKER}`,
+                `Unable to fetch live server status • Last checked <t:${nowUnix}:R>`,
+              ].join('\n'),
+            },
+            buildSeparator(),
+            {
+              type: MessageComponentTypes.SECTION,
+              components: [
+                {
+                  type: MessageComponentTypes.TEXT_DISPLAY,
+                  content: [
+                    '### HUB',
+                    `-# Console: \`connect ${HUB_ADDRESS}\``,
+                  ].join('\n'),
+                },
+              ],
+              accessory: buildConnectButton(true),
+            },
+            buildSeparator(),
+            {
+              type: MessageComponentTypes.TEXT_DISPLAY,
+              content: `-# Retrying every ${refreshSeconds}s`,
             },
           ],
         },
@@ -84,84 +163,109 @@ function buildStatusPayload(statusData, fetchError) {
   let onlineServers = 0;
   let hubOnline = false;
 
-  const fields = servers.map((server) => {
-    const entry = statusData?.[server.id];
-    const isHub = isHubServer(server.id, entry);
-    const hasValidCounts =
-      entry?.online &&
-      Number.isInteger(entry.players) &&
-      Number.isInteger(entry.max) &&
-      entry.players >= 0 &&
-      entry.max >= 0;
+  const hubServer = servers.find((server) => isHubServer(server.id, statusData?.[server.id])) || DEFAULT_SERVERS[0];
+  const gameServers = servers.filter((server) => server.id !== hubServer.id);
 
-    if (!hasValidCounts) {
-      return {
-        name: `🔴 ${server.name}`,
-        value: 'Offline',
-        inline: !isHub,
-      };
+  const hubEntry = statusData?.[hubServer.id];
+  if (hasValidEntry(hubEntry)) {
+    hubOnline = true;
+    onlinePlayers += hubEntry.players;
+    onlineServers += 1;
+  }
+
+  const gameLines = gameServers.map((server) => {
+    const entry = statusData?.[server.id];
+    if (!hasValidEntry(entry)) {
+      return `**${server.name}** — Offline`;
     }
 
     onlinePlayers += entry.players;
     onlineServers += 1;
-    if (isHub) hubOnline = true;
 
-    const lines = [`**${entry.players} / ${entry.max}** online`];
+    const mapLabel = formatMapName(entry.map);
+    const stateText = entry.ingame ? 'Match in progress' : 'Waiting';
+    const mapPart = mapLabel ? ` • \`${mapLabel}\`` : '';
 
-    if (!isHub) {
-      lines.push(entry.ingame ? 'Match in progress' : 'Waiting');
-    }
-
-    if (entry.map) {
-      lines.push(`Map: \`${entry.map}\``);
-    }
-
-    // Only expose direct connect info for the Hub
-    if (isHub) {
-      lines.push(`Console: \`connect ${HUB_ADDRESS}\``);
-    }
-
-    return {
-      name: `🟢 ${server.name}`,
-      value: lines.join('\n'),
-      inline: !isHub,
-    };
+    return `**${server.name}** — **${entry.players} / ${entry.max}** • ${stateText}${mapPart}`;
   });
 
-  const color = hubOnline ? 0x2ecc71 : onlineServers > 0 ? 0xf39c12 : 0xe74c3c;
+  const accentColor = hubOnline
+    ? COLORS.crimson
+    : onlineServers > 0
+      ? COLORS.cautionYellow
+      : COLORS.darkCrimson;
+
   const playerWord = onlinePlayers === 1 ? 'player' : 'players';
   const serverWord = onlineServers === 1 ? 'server' : 'servers';
 
-  // Connect button is shown ONLY for the Hub
-  const components = [
-    {
-      type: MessageComponentTypes.ACTION_ROW,
-      components: [
-        {
-          type: MessageComponentTypes.BUTTON,
-          style: ButtonStyleTypes.LINK,
-          label: hubOnline ? 'Connect to Hub' : 'Hub Offline',
-          url: buildHubConnectUrl(),
-          disabled: !hubOnline,
-        },
-      ],
-    },
-  ];
+  const hubDetails = hubOnline
+    ? [
+        `### ${hubServer.name.toUpperCase()}`,
+        `**${hubEntry.players} / ${hubEntry.max}** online • \`${formatMapName(hubEntry.map) || 'Lobby'}\``,
+        `-# Console: \`connect ${HUB_ADDRESS}\``,
+      ].join('\n')
+    : [
+        `### ${hubServer.name.toUpperCase()}`,
+        'Offline',
+        `-# Console: \`connect ${HUB_ADDRESS}\``,
+      ].join('\n');
 
   return {
-    embeds: [
+    flags: InteractionResponseFlags.IS_COMPONENTS_V2,
+    components: [
       {
-        title: EMBED_TITLE,
-        description: `**${onlinePlayers} ${playerWord}** online across **${onlineServers}/${servers.length} ${serverWord}**\nLast updated: <t:${nowUnix}:R>`,
-        color,
-        fields,
-        footer: {
-          text: `Updates every ${Math.round(POLL_INTERVAL_MS / 1000)} seconds • Quick games start from the Hub`,
-        },
+        type: MessageComponentTypes.CONTAINER,
+        accent_color: accentColor,
+        components: [
+          {
+            type: MessageComponentTypes.TEXT_DISPLAY,
+            content: [
+              `# ${STATUS_HEADER_MARKER}`,
+              `**${onlinePlayers} ${playerWord}** online across **${onlineServers}/${servers.length} ${serverWord}** • Updated <t:${nowUnix}:R>`,
+            ].join('\n'),
+          },
+          buildSeparator(),
+          {
+            type: MessageComponentTypes.SECTION,
+            components: [
+              {
+                type: MessageComponentTypes.TEXT_DISPLAY,
+                content: hubDetails,
+              },
+            ],
+            accessory: buildConnectButton(hubOnline),
+          },
+          buildSeparator(),
+          {
+            type: MessageComponentTypes.TEXT_DISPLAY,
+            content: ['### GAME SERVERS', ...gameLines].join('\n'),
+          },
+          buildSeparator(),
+          {
+            type: MessageComponentTypes.TEXT_DISPLAY,
+            content: `-# Quick games start from the Hub • Updates every ${refreshSeconds}s`,
+          },
+        ],
       },
     ],
-    components,
   };
+}
+
+function componentsContainMarker(components) {
+  if (!Array.isArray(components)) return false;
+  for (const comp of components) {
+    if (typeof comp?.content === 'string' && comp.content.includes(STATUS_HEADER_MARKER)) {
+      return true;
+    }
+    if (Array.isArray(comp?.components) && componentsContainMarker(comp.components)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isComponentsV2Message(msg) {
+  return Boolean((msg?.flags ?? 0) & InteractionResponseFlags.IS_COMPONENTS_V2);
 }
 
 async function fetchServerStatus() {
@@ -188,12 +292,15 @@ async function findExistingStatusMessage(channelId, botUserId) {
       method: 'GET',
     });
     const messages = await res.json();
-    const existing = messages.find(
-      (msg) =>
-        msg.author?.id === botUserId &&
-        msg.embeds?.some((embed) => embed.title === EMBED_TITLE)
-    );
-    return existing?.id || null;
+    const existing = messages.find((msg) => {
+      if (msg.author?.id !== botUserId) return false;
+      const isV2Match = isComponentsV2Message(msg) && componentsContainMarker(msg.components);
+      const isLegacyMatch = msg.embeds?.some((embed) => embed.title === LEGACY_EMBED_TITLE);
+      return isV2Match || isLegacyMatch;
+    });
+
+    if (!existing) return null;
+    return { id: existing.id, isV2: isComponentsV2Message(existing) };
   } catch (err) {
     console.warn('Could not look up existing status message:', err.message);
     return null;
@@ -222,9 +329,23 @@ export function startServerTracker() {
     }
 
     if (botUserId) {
-      statusMessageId = await findExistingStatusMessage(channelId, botUserId);
-      if (statusMessageId) {
-        console.log(`Reusing existing status message ${statusMessageId} in channel ${channelId}`);
+      const existing = await findExistingStatusMessage(channelId, botUserId);
+      if (existing) {
+        if (existing.isV2) {
+          statusMessageId = existing.id;
+          console.log(`Reusing existing status message ${statusMessageId} in channel ${channelId}`);
+        } else {
+          // Discord rejects upgrading a legacy embed message to IS_COMPONENTS_V2 via PATCH,
+          // so remove the old embed message and post a clean V2 card instead.
+          try {
+            await DiscordRequest(`channels/${channelId}/messages/${existing.id}`, {
+              method: 'DELETE',
+            });
+            console.log(`Replaced legacy status message ${existing.id} with Components V2 card`);
+          } catch (err) {
+            console.warn('Could not delete legacy status message:', err.message);
+          }
+        }
       }
     }
 
@@ -259,9 +380,9 @@ export function startServerTracker() {
           });
           return;
         } catch (err) {
-          // If the message was deleted, fall through and post a new one
-          if (err.status === 404 || err.message.includes('10008')) {
-            console.warn('Previous status message was deleted; posting a new one.');
+          // If the message was deleted or incompatible with V2 flags, post a fresh one
+          if (err.status === 404 || err.status === 400 || err.message.includes('10008')) {
+            console.warn('Previous status message could not be patched; posting a new one.');
             statusMessageId = null;
           } else {
             throw err;
