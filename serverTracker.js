@@ -11,6 +11,7 @@ import { DiscordRequest } from './utils.js';
 const STATUS_URL = process.env.STATUS_URL || 'http://57.128.191.109:8080/status.json';
 const JOIN_URL = process.env.JOIN_URL || 'http://57.128.191.109:8080/join/';
 const HUB_ADDRESS = process.env.HUB_ADDRESS || '57.128.191.109:27015';
+const HUB2_ADDRESS = process.env.HUB2_ADDRESS || '57.128.248.84:27015';
 const POLL_INTERVAL_MS = Number(process.env.STATUS_INTERVAL_MS) || 60_000;
 
 const LEGACY_EMBED_TITLE = 'Distrust Online — Server Status';
@@ -24,12 +25,18 @@ const COLORS = {
 };
 
 const DEFAULT_SERVERS = [
-  { id: 'hub', name: 'Hub' },
+  { id: 'hub', name: 'Hub 1', address: HUB_ADDRESS },
+  { id: 'hub2', name: 'Hub 2', address: HUB2_ADDRESS },
   { id: 'game1', name: 'Game 1' },
   { id: 'game2', name: 'Game 2' },
   { id: 'game3', name: 'Game 3' },
   { id: 'game4', name: 'Game 4' },
   { id: 'game5', name: 'Game 5' },
+  { id: 'game6', name: 'Game 6' },
+  { id: 'game7', name: 'Game 7' },
+  { id: 'game8', name: 'Game 8' },
+  { id: 'game9', name: 'Game 9' },
+  { id: 'game10', name: 'Game 10' },
 ];
 
 const KNOWN_MAPS = {
@@ -92,7 +99,7 @@ function getOrderedServers(statusData) {
 }
 
 function isHubServer(serverId, entry) {
-  return serverId === 'hub' || entry?.role === 'hub';
+  return serverId === 'hub' || /^hub\d+$/i.test(serverId) || entry?.role === 'hub';
 }
 
 function hasValidEntry(entry) {
@@ -154,8 +161,8 @@ export function buildStatusPayload(statusData, fetchError) {
                 {
                   type: MessageComponentTypes.TEXT_DISPLAY,
                   content: [
-                    '### HUB',
-                    `-# Console: \`connect ${HUB_ADDRESS}\``,
+                    '### HUBS',
+                    `-# Hub 1: \`connect ${HUB_ADDRESS}\` • Hub 2: \`connect ${HUB2_ADDRESS}\``,
                   ].join('\n'),
                 },
               ],
@@ -183,16 +190,15 @@ export function buildStatusPayload(statusData, fetchError) {
 
   const hubLines = hubServers.map((server) => {
     const entry = statusData?.[server.id];
+    const consoleHint = server.address ? ` • \`connect ${server.address}\`` : '';
     if (!hasValidEntry(entry)) {
-      return hubServers.length > 1 ? `**${server.name}** — Offline` : 'Offline';
+      return `**${server.name}** — Offline${consoleHint}`;
     }
     hubOnline = true;
     onlinePlayers += entry.players;
     onlineServers += 1;
     const mapLabel = formatMapName(entry.map) || 'Lobby';
-    return hubServers.length > 1
-      ? `**${server.name}** — **${entry.players} / ${entry.max}** online • \`${mapLabel}\``
-      : `**${entry.players} / ${entry.max}** online • \`${mapLabel}\``;
+    return `**${server.name}** — **${entry.players} / ${entry.max}** online • \`${mapLabel}\`${consoleHint}`;
   });
 
   const gameLines = gameServers.map((server) => {
@@ -221,7 +227,7 @@ export function buildStatusPayload(statusData, fetchError) {
   const serverWord = onlineServers === 1 ? 'server' : 'servers';
 
   const hubHeading = hubServers.length > 1 ? '### HUBS' : `### ${hubServers[0].name.toUpperCase()}`;
-  const hubDetails = [hubHeading, ...hubLines, `-# Console: \`connect ${HUB_ADDRESS}\``].join('\n');
+  const hubDetails = [hubHeading, ...hubLines].join('\n');
 
   return {
     flags: InteractionResponseFlags.IS_COMPONENTS_V2,
