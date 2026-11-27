@@ -7,10 +7,8 @@ import {
 import { DiscordRequest } from './utils.js';
 
 const STATUS_URL = process.env.STATUS_URL || 'http://57.128.191.109:8080/status.json';
-const DEFAULT_HUB_ADDRESS = '57.128.191.109:27015';
-const HUB_ADDRESS = process.env.HUB_ADDRESS || DEFAULT_HUB_ADDRESS;
-const HUB_CONNECT_URL =
-  process.env.HUB_CONNECT_URL || 'https://feyhood.github.io/discord-example-app/connect.html';
+const JOIN_URL = process.env.JOIN_URL || 'http://57.128.191.109:8080/join/';
+const HUB_ADDRESS = process.env.HUB_ADDRESS || '57.128.191.109:27015';
 const POLL_INTERVAL_MS = Number(process.env.STATUS_INTERVAL_MS) || 60_000;
 
 const LEGACY_EMBED_TITLE = 'Distrust Online — Server Status';
@@ -89,11 +87,7 @@ function hasValidEntry(entry) {
 }
 
 export function buildHubConnectUrl() {
-  const url = new URL(HUB_CONNECT_URL);
-  if (HUB_ADDRESS !== DEFAULT_HUB_ADDRESS && !url.searchParams.has('addr')) {
-    url.searchParams.set('addr', HUB_ADDRESS);
-  }
-  return url.toString();
+  return JOIN_URL;
 }
 
 function buildConnectButton(hubOnline) {
